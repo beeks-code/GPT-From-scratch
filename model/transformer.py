@@ -75,7 +75,7 @@ class MultiHeadAttention(nn.Module):
         self.register_buffer("v_cache",None)
 
 
-    def forward(self,x,use_cache=False):  
+    def forward(self,x,use_cache):  
         b,num_token,d_in=x.shape 
         new_new_key=self.W_k(x)  
         query=self.W_q(x)
@@ -109,7 +109,7 @@ class MultiHeadAttention(nn.Module):
         mask_bool = self.mask[offset:offset + q_len, :k_len].bool()
         attn_scores.masked_fill_(mask_bool, -torch.inf)
         attn_weights = torch.softmax(attn_scores / torch.sqrt(torch.tensor(self.head_dim)), dim=-1)
-        
+
         attn_weights = self.dropout(attn_weights)
         context_vector= (attn_weights @ new_value).transpose(1, 2) 
         context_vector = context_vector.contiguous().view(b, num_token, self.d_out)
@@ -133,11 +133,11 @@ class Transformer(nn.Module):
         self.norm2 = LayerNormalization(cfg["emb_dim"])
         self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
         
-    def forward(self,x):
+    def forward(self,x,use_cache):
 
         shortcut = x
         x=self.norm1(x)
-        x=self.attn(x)
+        x=self.attn(x,use_cache)
         x=self.drop_shortcut(x)
         x=x+shortcut
          ## 2nd shortcut connection

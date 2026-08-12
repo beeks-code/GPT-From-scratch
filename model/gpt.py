@@ -25,13 +25,13 @@ class GPT_124(nn.Module):
         self.Layer_norm=LayerNormalization(cfg["emb_dim"])
         self.output_head=nn.Linear(cfg["emb_dim"],cfg["vocab_size"],bias=False)
         
-    def forward(self,input_ids): ## takes tokens as input
+    def forward(self,input_ids,use_cache=False): ## takes tokens as input
         batch_size,seq_length=input_ids.shape
         tok_embd=self.token_emd(input_ids)
         pos_embd=self.pos_emb(torch.arange(seq_length,device=input_ids.device))
         x=tok_embd+pos_embd
         x=self.drop_out(x)
-        x=self.trf(x)
+        x=self.trf(x,use_cache)
         x=self.Layer_norm(x)
         out=self.output_head(x)
         return out
