@@ -64,24 +64,27 @@ class MultiHeadAttention(nn.Module):
         self.n_heads=n_heads
         self.context_length=context_length
         self.head_dim = d_out // n_heads
+
         self.W_q=nn.Linear(d_in,d_out,bias=qkv_bias)
         self.W_k=nn.Linear(d_in,d_out,bias=qkv_bias)
         self.W_v=nn.Linear(d_in,d_out,bias=qkv_bias)
         self.dropout=nn.Dropout(dropout)
-        self.register_buffer("mask", torch.triu(torch.ones(context_length, context_length),
-                       diagonal=1))
-        self.out_proj = nn.Linear(d_out, d_out)  
+
+        self.register_buffer("mask", torch.triu(
+            torch.ones(context_length, context_length), diagonal=1))
+
+        self.out_proj = nn.Linear(d_out, d_out)
         self.register_buffer("k_cache",None)
         self.register_buffer("v_cache",None)
 
+    def forward(self,x,use_cache):
+        b,num_token,d_in=x.shape
 
-    def forward(self,x,use_cache):  
-        b,num_token,d_in=x.shape 
-        new_new_key=self.W_k(x)  
+        new_key=self.W_k(x)
         query=self.W_q(x)
         new_value=self.W_v(x)
 
-        new_new_key=new_key.view(b,num_token,self.n_heads,self.head_dim)
+        new_key=new_key.view(b,num_token,self.n_heads,self.head_dim)
         query=query.view(b,num_token,self.n_heads,self.head_dim)
         new_value=new_value.view(b,num_token,self.n_heads,self.head_dim)
 
@@ -89,31 +92,43 @@ class MultiHeadAttention(nn.Module):
         query = query.transpose(1, 2)
         new_value = new_value.transpose(1, 2)
 
-        if self.k_cache is None:
-            self.k_cache,self.v_cache= new_key,new_value
+        if use_cache:
+            if self.k_cache is None:
+                self.k_cache,self.v_cache= new_key,new_value
+            else:
+                self.k_cache= torch.cat([self.k_cache,new_key],dim=2)
+                self.v_cache= torch.cat([self.v_cache,new_value],dim=2)
+
+            new_key,new_value=self.k_cache,self.v_cache
         else:
-            self.k_cache= torch.cat([self.k_cache,new_key],dim=2)
-            self.v_cache= torch.cat([self.v_cache,new_value],dim=2)   
+            new_key,new_value=new_key,new_value
 
-        new_key,new_value=self.k_cache,self.v_cache
-        q_len= new_key.size(2)
-        k_len=new_value.size(2)
+        q_len=query.size(2)
+        k_len=new_key.size(2)
 
-        assert q_len <= self.context_length (
-            f"KV cache length {k_len} exceeds context_length"
+        assert k_len <= self.context_length, (
+            f"KV cache length {k_len} exceeds context_length "
             f"{self.context_length}; call reset_cache() or truncate."
         )
 
         attn_scores = query @ new_key.transpose(2, 3)
-        offset=  k_len - q_len
+
+        offset = k_len - q_len
         mask_bool = self.mask[offset:offset + q_len, :k_len].bool()
+
         attn_scores.masked_fill_(mask_bool, -torch.inf)
-        attn_weights = torch.softmax(attn_scores / torch.sqrt(torch.tensor(self.head_dim)), dim=-1)
+
+        attn_weights = torch.softmax(
+            attn_scores / torch.sqrt(torch.tensor(self.head_dim)),
+            dim=-1
+        )
 
         attn_weights = self.dropout(attn_weights)
-        context_vector= (attn_weights @ new_value).transpose(1, 2) 
-        context_vector = context_vector.contiguous().view(b, num_token, self.d_out)
+
+        context_vector= (attn_weights @ new_value).transpose(1, 2)
+        context_vector = context_vector.contiguous().view(b,num_token,self.d_out)
         context_vector=self.out_proj(context_vector)
+
         return context_vector
     
     ### Single block of transformer
