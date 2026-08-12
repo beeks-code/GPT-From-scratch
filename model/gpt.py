@@ -13,28 +13,77 @@ GPT_CONFIG_124M = {
 } 
 
 
+# class GPT_124(nn.Module):
+#     def __init__(self,cfg):
+#         super().__init__()
+#         self.token_emd=nn.Embedding(cfg["vocab_size"],cfg["emb_dim"])
+#         self.pos_emb=nn.Embedding(cfg["context_length"],cfg["emb_dim"])
+#         self.drop_out=nn.Dropout(cfg["drop_rate"])
+#         self.trf=nn.ModuleList(
+#             [Transformer(cfg) for _ in range(cfg["n_layers"])]
+#         )
+#         self.Layer_norm=LayerNormalization(cfg["emb_dim"])
+#         self.output_head=nn.Linear(cfg["emb_dim"],cfg["vocab_size"],bias=False)
+        
+#     def forward(self,input_ids,use_cache=False): ## takes tokens as input
+#         batch_size,seq_length=input_ids.shape
+#         tok_embd=self.token_emd(input_ids)
+#         pos_embd=self.pos_emb(torch.arange(seq_length,device=input_ids.device))
+#         x=tok_embd+pos_embd
+#         x=self.drop_out(x)
+#         for block in self.trf:
+#             x=block(x,use_cache)
+#         x=self.Layer_norm(x)
+#         out=self.output_head(x)
+#         return out
+#     def reset_cache(self):
+#         for block in self.trf:
+#             block.reset_cache()
+
 class GPT_124(nn.Module):
-    def __init__(self,cfg):
+    def __init__(self, cfg):
         super().__init__()
-        self.token_emd=nn.Embedding(cfg["vocab_size"],cfg["emb_dim"])
-        self.pos_emb=nn.Embedding(cfg["context_length"],cfg["emb_dim"])
-        self.drop_out=nn.Dropout(cfg["drop_rate"])
-        self.trf=nn.Sequential(
-            *[Transformer(cfg) for _ in range(cfg["n_layers"])]
+        self.token_emd = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
+        self.pos_emb = nn.Embedding(cfg["context_length"], cfg["emb_dim"])
+        self.drop_out = nn.Dropout(cfg["drop_rate"])
+
+        self.trf = nn.ModuleList(
+            [Transformer(cfg) for _ in range(cfg["n_layers"])]
         )
-        self.Layer_norm=LayerNormalization(cfg["emb_dim"])
-        self.output_head=nn.Linear(cfg["emb_dim"],cfg["vocab_size"],bias=False)
-        
-    def forward(self,input_ids,use_cache=False): ## takes tokens as input
-        batch_size,seq_length=input_ids.shape
-        tok_embd=self.token_emd(input_ids)
-        pos_embd=self.pos_emb(torch.arange(seq_length,device=input_ids.device))
-        x=tok_embd+pos_embd
-        x=self.drop_out(x)
-        x=self.trf(x,use_cache)
-        x=self.Layer_norm(x)
-        out=self.output_head(x)
+
+        self.Layer_norm = LayerNormalization(cfg["emb_dim"])
+        self.output_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
+
+        # Tracks how many tokens have already been fed through the
+        # cache, so positional embeddings stay correct once we move
+        # from full-prompt prefill to one-token-at-a-time decoding.
+        self.cache_len = 0
+
+    def forward(self, input_ids, use_cache=False):
+        batch_size, seq_length = input_ids.shape
+        tok_embd = self.token_emd(input_ids)
+
+        start_pos = self.cache_len if use_cache else 0
+        positions = torch.arange(
+            start_pos, start_pos + seq_length,
+            device=input_ids.device
+        )
+        pos_embd = self.pos_emb(positions)
+
+        x = tok_embd + pos_embd
+        x = self.drop_out(x)
+
+        for block in self.trf:
+            x = block(x, use_cache)
+
+        x = self.Layer_norm(x)
+        out = self.output_head(x)
+
+        if use_cache:
+            self.cache_len += seq_length
         return out
-
-
-        
+    
+    def reset_cache(self):
+        self.cache_len = 0
+        for block in self.trf:
+            block.reset_cache()
