@@ -1,4 +1,4 @@
-from transformer import Transformer,LayerNormalization,GELU,FeedForward,MultiHeadAttention
+from transformer import Transformer,LayerNormalization,GELU,FeedForward
 import torch 
 import torch.nn as nn
 
