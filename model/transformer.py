@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 ## GPT configs
@@ -10,9 +11,9 @@ GPT_CONFIG_124M = {
     "n_heads": 12,          # Number of attention heads
     "n_layers": 12,         # Number of layers
     "drop_rate": 0.1,       # Dropout rate
-    "qkv_bias": False       # qkv  bias
+    "qkv_bias": False,      # Query-Key-Value bias
+    "n_experts":12          # No of Experts
 } 
-
 ### Layer Normalization
 class LayerNormalization(torch.nn.Module):
     def __init__(self,emb_dim):
@@ -53,6 +54,7 @@ class FeedForward(nn.Module):
     def forward(self,x):
         out=self.layer(x)
         return out  
+    
     
 ### Multihead Attention
 class MultiHeadAttention(nn.Module):
@@ -121,6 +123,105 @@ class MultiHeadAttention(nn.Module):
     def reset_cache(self):
         self.k_cache = None
         self.v_cache = None
+            
+## Mixture of experts
+class Expert(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net=nn.Sequential(
+            nn.Linear(GPT_CONFIG_124M["emb_dim"],4*GPT_CONFIG_124M["emb_dim"]),
+            GELU(),
+            nn.Linear(4*GPT_CONFIG_124M["emb_dim"],GPT_CONFIG_124M["emb_dim"]),
+            nn.Dropout(GPT_CONFIG_124M['drop_rate'])
+        )
+    def forward(self,x):
+        return self.net(x)
+    
+class Router(nn.Module):
+    def __init__(self,topk=3):
+        super().__init__()
+        self.top_k=topk
+        self.router=nn.Linear(GPT_CONFIG_124M["emb_dim"],GPT_CONFIG_124M["n_experts"])
+        self.noise=nn.Linear(GPT_CONFIG_124M["emb_dim"],GPT_CONFIG_124M["n_experts"])
+    def forward(self,x):
+        selector=self.router(x) 
+        if self.training: 
+            noise_logits=self.noise(x)
+            noisy_std=F.softplus(noise_logits)
+            noise=torch.randn_like(selector)* noisy_std
+            selector = selector + noise
+
+        topk_val,indices=torch.topk(selector,k=self.top_k,dim=-1)
+        mask=torch.full_like(selector,float('-inf'))
+        expert_selector=mask.scatter(-1,indices,topk_val)
+        gating_output=torch.softmax(expert_selector,dim=-1)
+        return gating_output,indices
+class SparseMOE(nn.Module):
+    def __init__(self, top_k=3):
+        super().__init__()
+        self.router = Router(topk=top_k)
+        self.experts = nn.ModuleList(Expert() for _ in range(GPT_CONFIG_124M["n_experts"]))
+        self.top_k = top_k
+
+    def forward(self, x):
+        gating_output, indices = self.router(x) 
+        final_output = torch.zeros_like(x)
+
+        flat_x = x.view(-1, x.size(-1))  
+        flat_gating_output = gating_output.view(-1, gating_output.size(-1))  
+
+        for i, expert in enumerate(self.experts):
+
+            expert_mask = (indices == i).any(dim=-1)
+            flat_mask = expert_mask.view(-1)  
+
+            if flat_mask.any():
+                expert_input = flat_x[flat_mask] 
+                expert_output = expert(expert_input)
+
+                gating_scores = flat_gating_output[flat_mask, i].unsqueeze(-1) 
+                weighted_output = expert_output * gating_scores 
+ 
+                final_output[expert_mask] += weighted_output 
+
+        return final_output
+
+
+
+class Transformer(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.attn = MultiHeadAttention(
+            d_in=cfg["emb_dim"],
+            d_out=cfg["emb_dim"],
+            context_length=cfg["context_length"],
+            dropout=cfg["drop_rate"],
+            n_heads=cfg["n_heads"],
+            qkv_bias=cfg["qkv_bias"]
+        )
+        self.moe=SparseMOE()
+        self.norm1 = LayerNormalization(cfg["emb_dim"])
+        self.norm2 = LayerNormalization(cfg["emb_dim"])
+        self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
+
+    def forward(self, x, use_cache=False):
+        shortcut = x
+        x = self.norm1(x)
+        x = self.attn(x, use_cache)
+        x = self.drop_shortcut(x)
+        x = x + shortcut
+
+        shortcut = x
+        x = self.norm2(x)
+        x = self.moe(x)
+        x = self.drop_shortcut(x)
+        x = x + shortcut
+        return x
+
+    def reset_cache(self):
+        self.attn.reset_cache()
+
+
 
 ## Multihead latent attention
 class MHLA(nn.Module):
@@ -174,46 +275,7 @@ class MHLA(nn.Module):
         context_vector=self.out_proj(context_vector)
         return context_vector
     def reset_cache(self):
-        self.cache_kv=None
-            
-        
-             
-
-
-
-
-class Transformer(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.attn = MultiHeadAttention(
-            d_in=cfg["emb_dim"],
-            d_out=cfg["emb_dim"],
-            context_length=cfg["context_length"],
-            dropout=cfg["drop_rate"],
-            n_heads=cfg["n_heads"],
-            qkv_bias=cfg["qkv_bias"]
-        )
-        self.ff = FeedForward(cfg)
-        self.norm1 = LayerNormalization(cfg["emb_dim"])
-        self.norm2 = LayerNormalization(cfg["emb_dim"])
-        self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
-
-    def forward(self, x, use_cache=False):
-        shortcut = x
-        x = self.norm1(x)
-        x = self.attn(x, use_cache)
-        x = self.drop_shortcut(x)
-        x = x + shortcut
-
-        shortcut = x
-        x = self.norm2(x)
-        x = self.ff(x)
-        x = self.drop_shortcut(x)
-        x = x + shortcut
-        return x
-
-    def reset_cache(self):
-        self.attn.reset_cache()
+        self.cache_kv=None        
     
 
 if __name__ == "__main__":
